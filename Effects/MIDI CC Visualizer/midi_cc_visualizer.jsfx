@@ -1,0 +1,522 @@
+// ===================================================================
+// MIDI CC VISUALIZER WITH REAL-TIME GRAPH AND PERFORMANCE METRICS
+// ===================================================================
+// Real-time visualization of MIDI Continuous Controller (CC) messages
+// with dual display modes: time-based graphs and current value bars
+// with integrated performance analysis metrics.
+//
+// FEATURES:
+// - Real-time scrolling XY graph showing CC value changes over time
+// - Horizontal bars displaying current CC values (0-127)
+// - Performance metrics for hardware testing and technique analysis:
+//   * Events per second: MIDI message frequency (hardware resolution)
+//   * Rate (u/s): Value change velocity (playing intensity)
+//   * Jitter: Timing consistency (hardware quality indicator)
+// - Dynamic layout: graph area maximizes available space while bars
+//   automatically adjust height based on number of active CCs
+// - Unique persistent color per CC from 12-color palette
+// - Configurable time window (1-30 seconds)
+// - Monitor all CCs simultaneously or focus on a single CC
+// - Full 0-127 value range with grid lines and axis labels
+// - Clean, minimal interface optimized for data clarity
+//
+// PERFORMANCE METRICS EXPLAINED:
+//
+// Events per Second (evt/s):
+//   - How many MIDI CC messages arrive per second
+//   - High values (60+) = high-resolution controller
+//   - Low values (10-20) = coarse updates or slow movements
+//   - Useful for: Testing controller resolution and USB timing
+//
+// Rate (u/s - units per second):
+//   - How fast CC values are changing (sum of value deltas per second)
+//   - Quality ratings: Gentle (0-15) | Moderate (16-40) | Active (41-70) | Aggressive (71+)
+//   - Useful for: Analyzing playing technique and gesture intensity
+//
+// Jitter (±milliseconds):
+//   - Timing consistency between MIDI events (standard deviation)
+//   - Quality ratings: Excellent (<5ms) | Very Good (6-15ms) | Good (16-30ms) | Fair (31-50ms) | Poor (>50ms)
+//   - Useful for: Hardware quality testing, detecting USB/timing issues
+//
+// DISPLAY FORMAT (per CC bar):
+// CC1  [████████████████░░░░░░░░] 67  │ Events: 45/s │ Rate: 23 u/s (Gentle) │ Jitter: ±4ms (Excellent)
+//
+// CONTROLS:
+// - Slider 1: CC to Monitor (0 = All CCs, 1-127 = specific CC)
+// - Slider 3: Time Window in seconds (1-30)
+//
+// ARCHITECTURE:
+// - Modular function-based design for maintainability
+// - Separate utility library (midi_cc_utils.jsfx-inc) for data management
+// - Separate metrics library (midi_cc_metrics.jsfx-inc) for performance analysis
+// - Efficient memory management for history buffer and metrics
+// - All metrics calculated over 1-second rolling window for real-time feedback
+// ===================================================================
+
+desc:MIDI CC Visualizer with Real-Time Graph and Metrics
+author: Giorgio Robino
+version: 0.4
+date: 2025-11-17
+
+// Import utility libraries
+import midi_cc_utils.jsfx-inc
+import midi_cc_metrics.jsfx-inc
+
+options:no_meter
+slider1:0<0,127,1>CC to Monitor (0=All)
+slider3:10<1,30,1>Time Window (seconds)
+
+@init
+// ========== CONFIGURATION VARIABLES ==========
+FONT_SIZE = 16;          // Text size
+BAR_HEIGHT = 8;          // Height of each CC bar
+BAR_SPACING = 8;         // Space between bars
+MIN_BAR_SECTION = 80;    // Minimum height for bar section
+MAX_BAR_PROPORTION = 0.35; // Bars take max 35% of window
+Y_AXIS_PADDING = 0.05;   // 5% padding top and bottom for Y-axis
+STATUS_TEXT_MARGIN = 25; // Space for status text at bottom
+
+// ========== GLOBAL LAYOUT VARIABLES ==========
+g_graph_height = 0;
+g_bars_height = 0;
+g_start_y = 0;
+g_label_width = 0;
+g_value_width = 0;
+g_margin = 0;
+g_available_width = 0;
+g_max_bars = 0;
+g_visible_bars = 0;
+g_separator_y = 0;
+g_graph_start_y = 0;
+g_graph_margin_left = 0;
+g_graph_margin_right = 0;
+g_graph_margin_bottom = 0;
+g_graph_width = 0;
+g_graph_actual_height = 0;
+g_y_range_min = 0;
+g_y_range_max = 0;
+g_y_range_total = 0;
+
+// ========== TIME WINDOW VARIABLES ==========
+g_time_window = 0;
+g_time_start = 0;
+g_time_end = 0;
+
+// ========== METRICS VARIABLES ==========
+g_last_prune_time = 0;
+PRUNE_INTERVAL = 0.1; // Prune old metrics every 100ms
+
+// ========== FUNCTION DEFINITIONS ==========
+
+/**
+ * Calculates all layout dimensions for the UI with dynamic sizing
+ * 
+ * This function computes:
+ * - Bar section height based on number of active CCs (dynamic!)
+ * - Graph section gets ALL remaining space (maximized!)
+ * - Bar positioning and spacing (at bottom)
+ * - Graph margins and dimensions (at top)
+ * - Y-axis range with padding
+ * 
+ * Results are stored in global g_* variables for use by drawing functions
+ * 
+ * @param filtered_count Number of CCs to display in bars section
+ */
+function calculate_layout(filtered_count) local(required_bar_height, max_bar_height) (
+  
+  // Calculate MINIMUM height needed for bars based on actual CC count
+  required_bar_height = (filtered_count * (BAR_HEIGHT + BAR_SPACING)) + STATUS_TEXT_MARGIN + 20;
+  required_bar_height = max(required_bar_height, MIN_BAR_SECTION);
+  
+  // Ensure bars don't dominate the window (max 35% of total height)
+  max_bar_height = floor(gfx_h * MAX_BAR_PROPORTION);
+  g_bars_height = min(required_bar_height, max_bar_height);
+  
+  // ========== GRAPH GETS ALL REMAINING SPACE ==========
+  g_graph_height = gfx_h - g_bars_height;
+  
+  // ========== GRAPH IS AT TOP ==========
+  g_graph_start_y = 10;
+  g_graph_margin_left = 35;
+  g_graph_margin_right = 10;
+  g_graph_margin_bottom = 10;
+  g_graph_width = gfx_w - g_graph_margin_left - g_graph_margin_right;
+  g_graph_actual_height = g_graph_height - g_graph_margin_bottom;
+  
+  // ========== BARS ARE AT BOTTOM ==========
+  g_start_y = g_graph_start_y + g_graph_height + 10;
+  g_label_width = FONT_SIZE * 4;
+  g_value_width = FONT_SIZE * 3;
+  g_margin = 20;
+  g_available_width = gfx_w - g_label_width - g_value_width - g_margin * 2;
+  
+  // Calculate how many bars can fit in allocated space
+  available_bar_space = g_bars_height - STATUS_TEXT_MARGIN;
+  g_max_bars = floor(available_bar_space / (BAR_HEIGHT + BAR_SPACING));
+  g_visible_bars = min(filtered_count, g_max_bars);
+  
+  // Calculate Y-axis range with padding
+  g_y_range_min = 0 - (127 * Y_AXIS_PADDING);
+  g_y_range_max = 127 + (127 * Y_AXIS_PADDING);
+  g_y_range_total = g_y_range_max - g_y_range_min;
+);
+
+/**
+ * Calculates the time window parameters in SECONDS
+ * 
+ * Sets:
+ * - g_time_window: Duration of visible time window (seconds)
+ * - g_time_start: Start time of visible window (seconds)
+ * - g_time_end: End time of visible window (seconds)
+ */
+function calculate_time_window() local(current_time_sec) (
+  current_time_sec = time_precise();
+  
+  g_time_window = slider3;
+  g_time_end = current_time_sec;
+  g_time_start = g_time_end - g_time_window;
+);
+
+
+/**
+ * Draws horizontal bars showing current CC values with performance metrics
+ * 
+ * For each active/filtered CC:
+ * - Draws CC number label
+ * - Draws colored bar proportional to CC value (0-127)
+ * - Draws numeric value
+ * - Draws performance metrics: Events/s, Rate, Jitter
+ * 
+ * Uses global layout variables set by calculate_layout()
+ */
+function draw_cc_bars() local(y_pos, i, cc_index, val, bar_x, width, bar_width,
+                               events_ps, rate_ps, rate_quality, jitter_ms, jitter_quality) (
+  y_pos = g_start_y;
+  i = 0;
+  
+  // Adjust bar width to leave room for metrics text
+  bar_width = floor(g_available_width * 0.25); // Bar takes 25% of available space
+  
+  loop(g_visible_bars,
+    cc_index = get_active_cc(i);
+    val = get_cc_value(cc_index);
+    
+    // Set color for this CC
+    get_cc_color(cc_index);
+    
+    // Draw CC number label
+    gfx_x = g_margin;
+    gfx_y = y_pos + (BAR_HEIGHT - FONT_SIZE) / 2;
+    gfx_printf("CC%d", cc_index);
+    
+    // Calculate and draw bar
+    bar_x = g_margin + g_label_width;
+    width = (val / 127.0) * bar_width;
+    width = max(width, 2);
+    
+    gfx_rect(bar_x, y_pos, width, BAR_HEIGHT);
+    
+    // Draw value number
+    gfx_x = bar_x + bar_width + 8;
+    gfx_y = y_pos + (BAR_HEIGHT - FONT_SIZE) / 2;
+    gfx_printf("%d", val);
+    
+    // Get metrics for this CC
+    events_ps = get_events_per_second(cc_index);
+    rate_ps = floor(get_rate_per_second(cc_index));
+    rate_quality = get_rate_quality(rate_ps);
+    jitter_ms = floor(get_jitter_ms(cc_index));
+    jitter_quality = get_jitter_quality(jitter_ms);
+    
+    // Draw metrics text
+    gfx_r = 0.7; gfx_g = 0.7; gfx_b = 0.7; gfx_a = 1;
+    gfx_x = bar_x + bar_width + 45;
+    gfx_y = y_pos + (BAR_HEIGHT - FONT_SIZE) / 2;
+    
+    events_ps > 0 ? (
+      gfx_printf("│ Events: %d/s │ Rate: %d u/s (%s) │ Jitter: ±%dms (%s)", 
+                 events_ps, rate_ps, rate_quality, jitter_ms, jitter_quality);
+    ) : (
+      gfx_printf("│ No activity in last second");
+    );
+    
+    y_pos += BAR_HEIGHT + BAR_SPACING;
+    i += 1;
+  );
+);
+
+/**
+ * Draws the graph grid lines without background
+ * 
+ * Creates:
+ * - Horizontal grid lines at CC values: 0, 32, 64, 96, 127
+ * - Y-axis value labels on the left side
+ * - Clean, minimal appearance without dark background
+ */
+function draw_graph_background() local(grid_values_count, grid_values_idx, grid_y, y) (
+  // Draw horizontal grid lines (CC value levels) - no background!
+  gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; gfx_a = 1;
+  gfx_setfont(1, "Arial", FONT_SIZE - 2);
+  
+  grid_values_count = 5;
+  grid_values_idx = 0;
+  loop(grid_values_count,
+    grid_values_idx == 0 ? grid_y = 0 :
+    grid_values_idx == 1 ? grid_y = 32 :
+    grid_values_idx == 2 ? grid_y = 64 :
+    grid_values_idx == 3 ? grid_y = 96 :
+    grid_y = 127;
+    
+    y = g_graph_start_y + g_graph_actual_height - ((grid_y - g_y_range_min) / g_y_range_total) * g_graph_actual_height;
+    gfx_line(g_graph_margin_left, y, g_graph_margin_left + g_graph_width, y);
+    
+    // Draw value labels on left
+    gfx_x = g_graph_margin_left - 30;
+    gfx_y = y - FONT_SIZE / 2;
+    gfx_printf("%d", grid_y);
+    
+    grid_values_idx += 1;
+  );
+  
+  // Restore normal font size
+  gfx_setfont(1, "Arial", FONT_SIZE);
+);
+
+/**
+ * Draws vertical time grid lines and labels on X-axis
+ * 
+ * Creates tick marks every 1 second with time labels showing
+ * seconds relative to the oldest visible point in the window
+ */
+function draw_time_grid() local(tick_interval, first_tick_time, current_tick_time, 
+                                 relative_time, x_pos) (
+  gfx_r = 0.4; gfx_g = 0.4; gfx_b = 0.4; gfx_a = 1;
+  
+  // Draw vertical grid lines every second
+  tick_interval = 1;
+  
+  // Calculate first tick position aligned with time_start
+  first_tick_time = ceil(g_time_start / tick_interval) * tick_interval;
+  current_tick_time = first_tick_time;
+  
+  // Draw ticks within the visible window
+  while (current_tick_time <= g_time_end) (
+    g_time_window > 0 ? (
+      // Calculate position relative to window
+      relative_time = current_tick_time - g_time_start;
+      x_pos = g_graph_margin_left + (relative_time / g_time_window) * g_graph_width;
+      
+      x_pos >= g_graph_margin_left && x_pos <= g_graph_margin_left + g_graph_width ? (
+        // Draw vertical grid line
+        gfx_line(x_pos, g_graph_start_y, x_pos, g_graph_start_y + g_graph_actual_height);
+      );
+    );
+    
+    current_tick_time += tick_interval;
+  );
+);
+
+/**
+ * Draws CC data lines and points on the graph
+ * 
+ * For each active CC (or selected CC):
+ * - Scans through history buffer
+ * - Filters data within visible time window
+ * - Draws lines connecting consecutive points
+ * - Draws dots at each data point
+ * - Draws border around graph area
+ * 
+ * Uses color assigned to each CC number
+ * 
+ * @param active_count Total number of active CCs
+ */
+function draw_cc_data_lines(active_count) local(history_count, cc_draw_count, cc_idx, cc_num,
+                                                 first_point, prev_x, prev_y, hist_idx, base,
+                                                 h_time, h_cc, h_val, relative_time, x, y) (
+  history_count = get_history_count();
+  
+  // For each active CC (or just selected CC)
+  cc_draw_count = slider1 != 0 ? 1 : active_count;
+  cc_idx = 0;
+  
+  loop(cc_draw_count,
+    cc_num = slider1 != 0 ? slider1 : get_active_cc(cc_idx);
+    
+    // Set color for this CC
+    get_cc_color(cc_num);
+    
+    // Scan through history and draw this CC's data
+    first_point = 1;
+    prev_x = 0;
+    prev_y = 0;
+    
+    hist_idx = 0;
+    loop(history_count,
+      base = get_history(hist_idx);
+      base >= 0 ? (
+        h_time = mem[base];
+        h_cc = mem[base + 1];
+        h_val = mem[base + 2];
+        
+        // Check if this entry matches current CC and is within time window
+        h_cc == cc_num && h_time >= g_time_start && h_time <= g_time_end ? (
+          g_time_window > 0 ? (
+            // Calculate X position using RELATIVE time from window start
+            relative_time = h_time - g_time_start;
+            x = g_graph_margin_left + (relative_time / g_time_window) * g_graph_width;
+            
+            // Calculate Y position with padding
+            y = g_graph_start_y + g_graph_actual_height - ((h_val - g_y_range_min) / g_y_range_total) * g_graph_actual_height;
+            
+            // Draw line from previous point
+            first_point == 0 ? (
+              gfx_line(prev_x, prev_y, x, y);
+            );
+            
+            // Draw dot at data point
+            gfx_circle(x, y, 2, 1);
+            
+            prev_x = x;
+            prev_y = y;
+            first_point = 0;
+          );
+        );
+      );
+      hist_idx += 1;
+    );
+    
+    cc_idx += 1;
+  );
+  
+  // Draw graph border for definition
+  gfx_r = 0.5; gfx_g = 0.5; gfx_b = 0.5; gfx_a = 1;
+  gfx_rect(g_graph_margin_left, g_graph_start_y, g_graph_width, g_graph_actual_height, 0);
+);
+
+/**
+ * Draws status information text at the bottom of the UI
+ * 
+ * Displays:
+ * - Waiting message if no data received
+ * - Time window settings and history point count
+ * 
+ * @param filtered_count Number of active/filtered CCs
+ * @param history_count Number of points in history buffer
+ */
+function draw_status_info(filtered_count, history_count) local() (
+  gfx_r = 0.6; gfx_g = 0.6; gfx_b = 0.6; gfx_a = 1;
+  gfx_x = 10;
+  gfx_y = gfx_h - STATUS_TEXT_MARGIN + 5;
+  
+  filtered_count == 0 ? (
+    slider1 != 0 ? (
+      gfx_printf("Waiting for CC%d data...", slider1);
+    ) : (
+      gfx_drawstr("Send MIDI CC data to visualize.");
+    );
+  ) : (
+    gfx_printf("Time: %d sec window | %d points in history | Metrics: 1-second rolling window", 
+               slider3, history_count);
+  );
+);
+
+/**
+ * Processes incoming MIDI messages in the audio block
+ * 
+ * Handles CC messages (0xB0):
+ * - Assigns color to new CCs
+ * - Stores current CC values
+ * - Adds timestamped entries to history buffer
+ * - Updates performance metrics
+ * - Passes all MIDI through unchanged
+ */
+function process_midi_messages() local(offset, msg1, msg2, msg3, status, cc_num, cc_val,
+                                        current_time_sec) (
+  // Get current time in seconds
+  current_time_sec = time_precise();
+  
+  // Process MIDI messages
+  while (midirecv(offset, msg1, msg2, msg3)) (
+    status = msg1 & 0xF0;
+    
+    // Check if this is a CC message (0xB0)
+    status == 0xB0 ? (
+      cc_num = msg2 & 0x7F;
+      cc_val = msg3 & 0x7F;
+      
+      // Assign color IMMEDIATELY when CC is first received
+      is_cc_active(cc_num) == 0 ? (
+        assign_color_to_cc(cc_num);
+      );
+      
+      // Store CC value and mark as active
+      store_cc_value(cc_num, cc_val);
+      
+      // Add to history with timestamp in SECONDS
+      add_to_history(current_time_sec, cc_num, cc_val);
+      
+      // Update metrics for this CC
+      update_metrics_for_cc(cc_num, cc_val, current_time_sec);
+    );
+    
+    // Pass MIDI through
+    midisend(offset, msg1, msg2, msg3);
+  );
+  
+  // Periodically prune old metrics (every 100ms)
+  current_time_sec - g_last_prune_time > PRUNE_INTERVAL ? (
+    prune_old_metrics(current_time_sec);
+    g_last_prune_time = current_time_sec;
+  );
+);
+
+@block
+// Process all MIDI messages in this audio block
+process_midi_messages();
+
+@sample
+// No per-sample processing needed
+
+@gfx 800 640
+// ========== MAIN RENDERING PIPELINE ==========
+
+// Clear background
+gfx_clear = 0;
+gfx_mode = 0;
+
+// Set font size
+gfx_setfont(1, "Arial", FONT_SIZE);
+
+// ========== BUILD SORTED LIST OF ACTIVE CCs ==========
+active_count = build_active_cc_list();
+
+// ========== APPLY CC FILTER ==========
+filtered_count = 0;
+slider1 != 0 ? (
+  is_cc_active(slider1) == 1 ? (
+    // Show only selected CC
+    mem[256] = slider1;
+    filtered_count = 1;
+  ) : (
+    filtered_count = 0;
+  );
+) : (
+  // Show all active CCs
+  filtered_count = active_count;
+);
+
+// ========== CALCULATE DYNAMIC LAYOUT ==========
+calculate_layout(filtered_count);
+
+// ========== CALCULATE TIME WINDOW ==========
+calculate_time_window();
+
+// ========== DRAW UI ELEMENTS ==========
+draw_graph_background();
+draw_time_grid();
+draw_cc_data_lines(active_count);
+draw_cc_bars();
+
+// Get history count for status display
+history_count = get_history_count();
+draw_status_info(filtered_count, history_count);

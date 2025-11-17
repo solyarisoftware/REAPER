@@ -1,0 +1,237 @@
+// ===================================================================
+// MIDI CC UTILITIES LIBRARY
+// ===================================================================
+// Utility functions for MIDI CC visualization
+// This is a library file (.jsfx-inc) to be imported by JSFX plugins
+//
+// PROVIDES:
+// - Color palette management (12-color system)
+// - Color assignment and retrieval for CC numbers
+// - History buffer management (circular buffer)
+// - Memory-safe data structures
+//
+// USAGE:
+// import midi_cc_utils.jsfx-inc
+// ===================================================================
+
+@init
+
+// ========== MEMORY LAYOUT CONSTANTS ==========
+// These define where data is stored in memory to avoid collisions
+MEM_CC_VALUES = 0;        // mem[0-127]: Current CC values
+MEM_CC_ACTIVE = 128;      // mem[128-255]: Active flags
+MEM_CC_SORTED = 256;      // mem[256-383]: Sorted active CC list
+MEM_CC_COLORS = 500;      // mem[500-627]: Color assignments
+MEM_COLOR_PALETTE = 700;  // mem[700-799]: RGB color palette
+MEM_HISTORY_BASE = 1000;  // mem[1000-7000]: History buffer
+MEM_HISTORY_WRITE = 20000; // Write position pointer
+MEM_HISTORY_COUNT = 20001; // Item count
+MEM_NEXT_COLOR = 20002;    // Next color index to assign
+
+// ========== CONFIGURATION ==========
+MAX_HISTORY_ITEMS = 2000;  // Maximum history buffer size
+COLOR_PALETTE_SIZE = 12;   // Number of colors in palette
+
+// ========== COLOR PALETTE INITIALIZATION ==========
+// Highly distinct, bright colors optimized for dark backgrounds
+function init_color_palette() (
+  // Store RGB values in memory starting at MEM_COLOR_PALETTE
+  // Each color uses 3 slots [R, G, B]
+  
+  // Color 0: Bright Red
+  mem[700] = 1.0; mem[701] = 0.2; mem[702] = 0.2;
+  // Color 1: Bright Green
+  mem[703] = 0.2; mem[704] = 1.0; mem[705] = 0.3;
+  // Color 2: Bright Blue
+  mem[706] = 0.3; mem[707] = 0.5; mem[708] = 1.0;
+  // Color 3: Bright Yellow
+  mem[709] = 1.0; mem[710] = 0.95; mem[711] = 0.2;
+  // Color 4: Bright Cyan
+  mem[712] = 0.2; mem[713] = 0.95; mem[714] = 0.95;
+  // Color 5: Bright Magenta
+  mem[715] = 1.0; mem[716] = 0.3; mem[717] = 0.9;
+  // Color 6: Bright Orange
+  mem[718] = 1.0; mem[719] = 0.6; mem[720] = 0.2;
+  // Color 7: Bright Lime
+  mem[721] = 0.7; mem[722] = 1.0; mem[723] = 0.3;
+  // Color 8: Bright Purple
+  mem[724] = 0.7; mem[725] = 0.4; mem[726] = 1.0;
+  // Color 9: Bright Pink
+  mem[727] = 1.0; mem[728] = 0.5; mem[729] = 0.7;
+  // Color 10: Bright Teal
+  mem[730] = 0.3; mem[731] = 0.9; mem[732] = 0.7;
+  // Color 11: Bright Coral
+  mem[733] = 1.0; mem[734] = 0.5; mem[735] = 0.4;
+);
+
+// ========== COLOR MANAGEMENT ==========
+// Assigns a unique color to a CC number when first received
+// Colors are assigned sequentially from the 12-color palette
+function assign_color_to_cc(cc_num) local(color_idx, current_idx) (
+  // Check if color already assigned
+  color_idx = mem[MEM_CC_COLORS + cc_num];
+  
+  color_idx < 0 ? (
+    // Not assigned yet, get next available color index
+    current_idx = mem[MEM_NEXT_COLOR];
+    
+    // Ensure index is valid (0-11)
+    current_idx < 0 ? current_idx = 0;
+    current_idx >= COLOR_PALETTE_SIZE ? current_idx = 0;
+    
+    // Assign THIS color to THIS CC permanently
+    mem[MEM_CC_COLORS + cc_num] = current_idx;
+    
+    // Increment for next CC (cycle 0-11)
+    mem[MEM_NEXT_COLOR] = (current_idx + 1) % COLOR_PALETTE_SIZE;
+  );
+);
+
+// Sets gfx color variables (gfx_r, gfx_g, gfx_b, gfx_a) to the color
+// assigned to the given CC number
+function get_cc_color(cc_num) local(color_idx, base) (
+  // Get assigned color index
+  color_idx = mem[MEM_CC_COLORS + cc_num];
+  
+  // Safety check: if not assigned, assign now
+  color_idx < 0 ? (
+    assign_color_to_cc(cc_num);
+    color_idx = mem[MEM_CC_COLORS + cc_num];
+  );
+  
+  // Additional safety: ensure color index is valid
+  color_idx < 0 || color_idx >= COLOR_PALETTE_SIZE ? (
+    color_idx = 0;
+  );
+  
+  // Get color from palette and set gfx variables
+  base = MEM_COLOR_PALETTE + (color_idx * 3);
+  gfx_r = mem[base];
+  gfx_g = mem[base + 1];
+  gfx_b = mem[base + 2];
+  gfx_a = 1;
+);
+
+// ========== CC DATA MANAGEMENT ==========
+// Stores a CC value and marks it as active
+function store_cc_value(cc_num, cc_value) (
+  mem[MEM_CC_VALUES + cc_num] = cc_value;
+  mem[MEM_CC_ACTIVE + cc_num] = 1;
+);
+
+// Retrieves a CC value
+function get_cc_value(cc_num) (
+  mem[MEM_CC_VALUES + cc_num];
+);
+
+// Checks if a CC number has been received
+function is_cc_active(cc_num) (
+  mem[MEM_CC_ACTIVE + cc_num];
+);
+
+// Builds a sorted list of active CC numbers
+// Returns the count of active CCs
+function build_active_cc_list() local(count, i) (
+  count = 0;
+  i = 0;
+  loop(128,
+    mem[MEM_CC_ACTIVE + i] == 1 ? (
+      mem[MEM_CC_SORTED + count] = i;
+      count += 1;
+    );
+    i += 1;
+  );
+  count; // Return count
+);
+
+// Gets a CC number from the sorted active list
+function get_active_cc(index) (
+  mem[MEM_CC_SORTED + index];
+);
+
+// ========== HISTORY BUFFER MANAGEMENT ==========
+// Circular buffer that stores [timestamp, cc_num, cc_value] triplets
+// Automatically overwrites oldest data when full
+
+// Adds a data point to the history buffer
+// timestamp: Time value (seconds or beats)
+// cc_num: MIDI CC number (0-127)
+// cc_value: CC value (0-127)
+function add_to_history(timestamp, cc_num, cc_value) local(pos, base) (
+  pos = mem[MEM_HISTORY_WRITE]; // Current write position
+  base = MEM_HISTORY_BASE + (pos * 3);
+  
+  // Store the triplet
+  mem[base] = timestamp;
+  mem[base + 1] = cc_num;
+  mem[base + 2] = cc_value;
+  
+  // Update write position (circular buffer)
+  mem[MEM_HISTORY_WRITE] = (pos + 1) % MAX_HISTORY_ITEMS;
+  
+  // Update count (max at MAX_HISTORY_ITEMS)
+  mem[MEM_HISTORY_COUNT] = min(mem[MEM_HISTORY_COUNT] + 1, MAX_HISTORY_ITEMS);
+);
+
+// Retrieves a history item by index (0 = oldest, count-1 = newest)
+// Returns base memory address of triplet, or -1 if invalid index
+// Access data as: mem[base] = timestamp, mem[base+1] = cc_num, mem[base+2] = value
+function get_history(index) local(count, write_pos, actual_pos, base) (
+  count = mem[MEM_HISTORY_COUNT];
+  index >= count ? (
+    -1; // Invalid index
+  ) : (
+    write_pos = mem[MEM_HISTORY_WRITE];
+    
+    // Calculate actual position in circular buffer
+    count < MAX_HISTORY_ITEMS ? (
+      // Buffer not full yet, items are sequential from 0
+      actual_pos = index;
+    ) : (
+      // Buffer is full, oldest item is at write_pos
+      actual_pos = (write_pos + index) % MAX_HISTORY_ITEMS;
+    );
+    
+    base = MEM_HISTORY_BASE + (actual_pos * 3);
+    base; // Return base address
+  );
+);
+
+// Returns the current number of items in history
+function get_history_count() (
+  mem[MEM_HISTORY_COUNT];
+);
+
+// Clears the history buffer (optional utility function)
+function clear_history() (
+  mem[MEM_HISTORY_WRITE] = 0;
+  mem[MEM_HISTORY_COUNT] = 0;
+);
+
+
+// ========== INITIALIZATION ==========
+function init_cc_utils() (
+  // Initialize CC values and flags
+  memset(MEM_CC_VALUES, 0, 128);
+  memset(MEM_CC_ACTIVE, 0, 128);
+  
+  // Initialize color assignments to -1 (unassigned)
+  i = 0;
+  loop(128,
+    mem[MEM_CC_COLORS + i] = -1;
+    i += 1;
+  );
+  
+  // Initialize history pointers
+  mem[MEM_HISTORY_WRITE] = 0;
+  mem[MEM_HISTORY_COUNT] = 0;
+  mem[MEM_NEXT_COLOR] = 0;
+  
+  // Initialize color palette
+  init_color_palette();
+);
+
+
+// ========== AUTO-INITIALIZATION ==========
+// Automatically initialize when library is imported
+init_cc_utils();
